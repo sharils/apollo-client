@@ -1,17 +1,40 @@
 ---
 title: Core pagination API
 sidebar_title: Core API
+description: Fetching and caching paginated results
 ---
+
+The Apollo Client APIs described in this article are useful for handling all paginated list fields, regardless of which pagination strategy a field uses.
 
 ## The `fetchMore` function
 
-In Apollo, the easiest way to request additional pages of paginated data is a function called [`fetchMore`](../caching/advanced-topics/#incremental-loading-fetchmore), which is a method of the `ObservableQuery` class returned by `client.watchQuery`, and is also included in the object returned by the `useQuery` Hook.
+Pagination always involves sending followup queries to your GraphQL server to obtain additional pages of results. In Apollo Client, the recommended way to send these followup queries is with the [`fetchMore`](../caching/advanced-topics/#incremental-loading-fetchmore) function. This function is a member of the `ObservableQuery` object returned by `client.watchQuery`, and it's also included in the object returned by the `useQuery` hook:
 
-In the `options` you pass to `fetchMore`, you specify the new `options.variables` and (optionally) an `options.query` to be used when fetching the additional data. If no `options.query` is specified, the original query passed to `client.watchQuery` or `useQuery` will be reused.
+```js
+const { loading, data, fetchMore } = useQuery(GET_ITEMS, { //highlight-line
+  variables: {
+    offset: 0,
+    limit: 10
+  },
+});
+```
 
-In Apollo Client 2, you would also provide an `options.updateQuery` function, which was responsible for merging fetched pages with existing data in the cache. In Apollo Client 3, custom `merge` functions allow this logic to be specified in a central location, rather than duplicated everywhere you call `fetchMore`.
+When you then call `fetchMore`, you can provide a new set of `variables` in the function's `options` object (such as a new `offset`):
 
-Examples of `fetchMore` usage can be found on subsequent pages of this documentation: [Offset-based pagination](./offset-based) and [Cursor-based pagination](./cursor-based). The rest of this page covers the field policy configuration API that allows `fetchMore` to avoid worrying about internal details.
+```js
+fetchMore({
+  variables: {
+    offset: 10,
+    limit: 10
+  },
+});
+```
+
+You can also optionally provide an entirely different shape of `query` to execute (by default, the original query's shape is used).
+
+> In Apollo Client 2, you would also provide `fetchMore` an `updateQuery` function, which was responsible for merging the followup query's results with your existing cached data. In Apollo Client 3, you instead define custom `merge` functions. This enables you to specify all of your pagination logic in a central location, instead of duplicating it everywhere you call `fetchMore`.
+
+Full examples of using `fetchMore` are provided in the detailed documentation for [offset-based pagination](./offset-based) and [cursor-based pagination](./cursor-based). The rest of this article covers the field policy configuration API that enables `fetchMore` to ignore how its followup query's results are cached.
 
 ## Combining pages with `merge` functions
 

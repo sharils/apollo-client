@@ -32,124 +32,55 @@ fetchMore({
 
 You can also optionally provide an entirely different shape of `query` to execute (by default, the original query's shape is used).
 
-> In Apollo Client 2, you would also provide `fetchMore` an `updateQuery` function, which was responsible for merging the followup query's results with your existing cached data. In Apollo Client 3, you instead define custom `merge` functions. This enables you to specify all of your pagination logic in a central location, instead of duplicating it everywhere you call `fetchMore`.
+> In Apollo Client 2, you would also provide `fetchMore` an `updateQuery` function, which was responsible for merging the followup query's results with your existing cached data. In Apollo Client 3, you instead [define custom `merge` functions](#merging-paginated-results). This enables you to specify all of your pagination logic in a central location, instead of duplicating it everywhere you call `fetchMore`.
 
-Full examples of using `fetchMore` are provided in the detailed documentation for [offset-based pagination](./offset-based) and [cursor-based pagination](./cursor-based). The rest of this article covers the field policy configuration API that enables `fetchMore` to ignore how its followup query's results are cached.
+Full examples of using `fetchMore` are provided in the detailed documentation for [offset-based pagination](./offset-based) and [cursor-based pagination](./cursor-based). The rest of this article covers the field policy configuration API that enables `fetchMore` to ignore how followup query results are cached.
 
-## Combining pages with `merge` functions
+## Merging paginated results
 
 > The example below uses offset-based pagination, but this article applies to all pagination strategies.
 
-While it is possible to store individual pages of list data separately on the client, application code that consumes the data tends to be simpler if the client combines all the pages it has received so far into a single list, using field arguments to guide how new data is spliced together with existing data.
+To specify which page of a list field you want to fetch, you usually set the value of an argument for that field, such as `offset` or `cursor`. This argument's value is different for each query that fetches a different page of the list.
 
-Suppose your schema defines the following types:
+Because the argument values for these queries are different, Apollo Client treats the _results_ of the queries as different (by default). The result of each query is stored as an entirely separate entity in the cache, and each entity includes the argument values in its unique identifier.
 
-```graphql
-extend type Query {
-  feed(
-    type: FeedType!,
-    offset: Int,
-    limit: Int,
-  ): [FeedItem!]
-}
+Although this argument-based separation is helpful in most cases, it usually _isn't_ what you want when implementing pagination. Instead, you want all returned pages to be merged into a _single_ list in your cache. To achieve this, you can configure a **field policy** for the paginated field.
 
-enum FeedType {
-  PERSONAL
-  PUBLIC
+### Defining a field policy
+
+A field policy specifies how a particular field in your Apollo Client cache is read and written. You can define a field policy to merge the results of paginated queries into a single list.
+
+#### Example
+
+Here's the server-side schema for a message feed application that uses offset-based pagination:
+
+```graphql{2}
+type Query {
+  feed(offset: Int, limit: Int): [FeedItem!]
 }
 
 type FeedItem {
   id: String!
-  # ...
+  message: String!
 }
 ```
 
-The query you use to fetch data for the `Query.feed` field might look something like this:
-```ts
-const FEED_QUERY = gql`
-  query Feed($type: FeedType!, $offset: Int, $limit: Int) {
-    feed(type: $type, offset: $offset, limit: $limit) {
-      id
-      # ... other FeedItem fields
-    }
-  }
-`;
-```
+In our client, we want to define a field policy for `Query.feed` so that all returned pages of the list are merged into a _single_ list in our cache.
 
-Without input from you, `InMemoryCache` has no way of knowing how to interpret these field arguments, so it must assume they are all important. For example, imagine writing two consecutive pages into a cache that does not know about your pagination system:
+We define our field policy within the `typePolicies` option we provide the constructor of `InMemoryCache`:
 
-```ts
-const cache = new InMemoryCache;
-
-cache.writeQuery({
-  query: FEED_QUERY,
-  variables: {
-    type: "PERSONAL",
-    offset: 0,
-    limit: 2,
-  },
-  data: {
-    feed: [
-      { __typename: "FeedItem", id: 1 },
-      { __typename: "FeedItem", id: 2 },
-    ]
-  }
-});
-
-cache.writeQuery({
-  query: FEED_QUERY,
-  variables: {
-    type: "PERSONAL",
-    offset: 2, // Changed!
-    limit: 2,
-  },
-  data: {
-    feed: [
-      { __typename: "FeedItem", id: 3 },
-      { __typename: "FeedItem", id: 4 },
-    ]
-  }
-});
-```
-
-The cache stores those two results separately by default, using keys derived from both the field name (`feed`) and the serialized arguments (`limit`, `offset`, and `type`):
-
-```js
-expect(cache.extract()).toEqual({
-  // Internal, normalized InMemoryCache data:
-  "FeedItem:1": { __typename: "FeedItem", id: 1 },
-  "FeedItem:2": { __typename: "FeedItem", id: 2 },
-  "FeedItem:3": { __typename: "FeedItem", id: 3 },
-  "FeedItem:4": { __typename: "FeedItem", id: 4 },
-  "ROOT_QUERY": {
-    __typename: "Query",
-    // Notice we end up with two separate pages, one per unique
-    // combination of Query.feed field arguments.
-    'feed({"limit":2,"offset":0,"type":"PERSONAL"})': [
-      { __ref: "FeedItem:1" },
-      { __ref: "FeedItem:2" },
-    ],
-    'feed({"limit":2,"offset":2,"type":"PERSONAL"})': [
-      { __ref: "FeedItem:3" },
-      { __ref: "FeedItem:4" },
-    ],
-  },
-});
-```
-
-A simplistic way to accumulate a single list instead of storing separate lists is to concatenate the results together, using a `merge` function for the `Query.feed` field:
-
-```js
+```js{5-15}
 const cache = new InMemoryCache({
   typePolicies: {
     Query: {
       fields: {
         feed: {
-          // Stop using limit and offset to differentiate field keys,
-          // but continue using type.
-          keyArgs: ["type"],
-          // If there is no existing value for this field, existing
-          // will be undefined.
+          // Don't cache separate results based on 
+          // any of this field's argument values.
+          keyArgs: [],
+
+          // Combine the incoming list items with the
+          // existing list items.
           merge(existing = [], incoming) {
             return [...existing, ...incoming];
           },
@@ -160,28 +91,39 @@ const cache = new InMemoryCache({
 })
 ```
 
-Now that the cache has a strategy for combining incoming pages with existing data, its internal representation will be a bit more compact:
+This field policy defines a list of **`keyArgs`**, along with a **`merge` function**. Both of these are necessary for handling pagination:
 
-```js
-expect(cache.extract()).toEqual({
-  "FeedItem:1": { __typename: "FeedItem", id: 1 },
-  "FeedItem:2": { __typename: "FeedItem", id: 2 },
-  "FeedItem:3": { __typename: "FeedItem", id: 3 },
-  "FeedItem:4": { __typename: "FeedItem", id: 4 },
-  "ROOT_QUERY": {
-    __typename: "Query",
-    // One consolidated list of Query.feed data (per type):
-    'feed({"type":"PERSONAL"})': [
-      { __ref: "FeedItem:1" },
-      { __ref: "FeedItem:2" },
-      { __ref: "FeedItem:3" },
-      { __ref: "FeedItem:4" },
-    ],
-  },
-});
+* `keyArgs` lists each argument that causes the cache to store a _separate_ result based on that argument's value. In this case, the cache shouldn't store a separate result based on either `offset` _or_ `limit`, so the list is empty.
+  * Whenever a particular argument's value could cause items from an _entirely different list_ to be returned for the field, that argument _should_ be included in `keyArgs`.
+  * For more information, see [Specifying key arguments](../caching/cache-field-behavior/#specifying-key-arguments).
+* A `merge` function tells the Apollo Client cache how to combine `incoming` data with `existing` cached data for a particular field. Without this function, a followup query _overwrites_ the existing cached value by default.
+  * For more information, see [The `merge` function](../caching/cache-field-behavior/#the-merge-function).
+
+With this field policy in place, Apollo Client merges the results of all queries that use the following structure, regardless of argument values:
+
+```ts
+// Client-side query definition
+const FEED_QUERY = gql`
+  query Feed($offset: Int, $limit: Int) {
+    feed(offset: $offset, limit: $limit) {
+      id
+      message
+    }
+  }
+`;
 ```
 
-However, this simple strategy makes some risky assumptions about the order of the written pages, because it ignores the `offset` and `limit` arguments. In order to handle those arguments correctly, your `merge` function should use `options.args` to decide where to put the incoming data:
+### Designing the `merge` function
+
+In [the example above](#example), our `merge` function is a single line:
+
+```js
+merge(existing = [], incoming) {
+  return [...existing, ...incoming];
+}
+```
+
+This function makes risky assumptions about the order in which the client requests pages, because it ignores the values of `offset` and `limit`. A more robust `merge` function can use `options.args` to decide where to put `incoming` data relative to `existing` data, like so:
 
 ```js
 const cache = new InMemoryCache({
@@ -189,7 +131,7 @@ const cache = new InMemoryCache({
     Query: {
       fields: {
         feed: {
-          keyArgs: ["type"],
+          keyArgs: [],
           merge(existing, incoming, { args: { offset = 0 }}) {
             // Slicing is necessary because the existing data is
             // immutable, and frozen in development.
@@ -206,8 +148,7 @@ const cache = new InMemoryCache({
 });
 ```
 
-This logic handles sequential page writes the same way the concatenation strategy would, but it can also tolerate repeated, overlapping, or out-of-order writes, without duplicating any list items.
-
+This logic handles sequential page writes the same way the single-line strategy does, but it can also tolerate repeated, overlapping, or out-of-order writes, without duplicating any list items.
 
 ## Two kinds of `read` function
 
